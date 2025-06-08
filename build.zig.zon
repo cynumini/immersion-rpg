@@ -1,0 +1,21 @@
+.{
+    .name = .immersion_rpg,
+
+    .version = "0.0.0",
+
+    .fingerprint = 0x9997c1abe8575ada,
+
+    .minimum_zig_version = "0.15.0-dev.740+21a0885ae",
+
+    .dependencies = .{
+        .sakana = .{
+            .path = "sakana",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
