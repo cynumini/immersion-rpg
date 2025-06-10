@@ -58,13 +58,15 @@ pub fn floatToInt(T: type, value: anytype) T {
     return @intFromFloat(value);
 }
 
-pub fn calcLevel(current_xp: f32, goal: f32) struct { usize, f32 } {
+pub fn calcLevel(current_xp: f32, goal: f32) struct { usize, f32, f32 } {
     const coefficient: f32 = goal / levels[levels.len - 1];
     for (0.., levels) |level, xp| {
         const need_xp = coefficient * xp;
-        if (current_xp < need_xp) return .{ level, need_xp };
+        const level_f32: f32 = @floatFromInt(level);
+        const difference: f32 = if (level == 0) 0 else (level_f32 + 300 * std.math.pow(f32, 2, level_f32 / 7.0)) / 4;
+        if (current_xp < need_xp) return .{ level, need_xp, difference * coefficient };
     } else {
-        return .{ 99, goal };
+        return .{ 99, goal, 0 };
     }
 }
 
@@ -171,7 +173,7 @@ pub fn main() !void {
     } else |err| if (err != error.EndOfStream) return err;
 
     for (0..skills.len - 1) |i| {
-        skills[skills.len - 1].amount += skills[i].amount / Type.fromInt(i).getGoal() * 100;
+        skills[skills.len - 1].amount += skills[i].amount / Type.fromInt(i).getGoal() * 1000;
     }
     skills[skills.len - 1].amount /= 6;
 
@@ -197,18 +199,19 @@ pub fn main() !void {
 
     for (skills) |skill| {
         const goal = skill.type.getGoal();
-        const level, const need_xp = calcLevel(skill.amount, goal);
+        const level, const need_xp, const difference = calcLevel(skill.amount, goal);
 
         try stdout.print("{s} ", .{skill.name});
         for (0..(max_string_len - skill.name.len)) |_| try stdout.writeAll(" ");
         try stdout.print("({:2})/99", .{level});
-        const current_level_string_len= 7;
+        const current_level_string_len = 7;
 
         const string = blk: {
             if (level != 99) {
-                break :blk try std.fmt.allocPrint(allocator, "{}/{d:.2} ({d:.2}%)\n", .{
+                break :blk try std.fmt.allocPrint(allocator, "{}/{d:.2} (left: {d:.2}) ({d:.2}%)\n", .{
                     skn.fmt.Float{ .value = skill.amount },
                     skn.fmt.Float{ .value = need_xp },
+                    skn.fmt.Float{ .value = need_xp - skill.amount },
                     skill.amount / need_xp * 100,
                 });
             } else break :blk try std.fmt.allocPrint(allocator, "{}\n", .{
@@ -222,7 +225,8 @@ pub fn main() !void {
         }
         try stdout.print("{s}", .{string});
 
-        try printProgressBar(stdout, column_count, skill.amount, need_xp);
+        const current = skill.amount - (need_xp - difference);
+        try printProgressBar(stdout, column_count, current, difference);
         try stdout.print("\n", .{});
     }
 }
