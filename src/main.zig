@@ -15,6 +15,10 @@ const Type = enum(usize) {
         return @enumFromInt(value);
     }
 
+    pub fn toUsize(self: Type) usize {
+        return @intFromEnum(self);
+    }
+
     pub fn len() usize {
         return @typeInfo(Type).@"enum".fields.len;
     }
@@ -57,14 +61,14 @@ pub fn floatToInt(T: type, value: anytype) T {
 pub fn calcLevel(current_xp: f32, goal: f32) struct { usize, f32 } {
     const coefficient: f32 = goal / levels[levels.len - 1];
     for (0.., levels) |level, xp| {
-        const need_xp_to_next = coefficient * xp;
-        if (current_xp < need_xp_to_next) return .{ level, need_xp_to_next };
+        const need_xp = coefficient * xp;
+        if (current_xp < need_xp) return .{ level, need_xp };
     } else {
         return .{ 99, goal };
     }
 }
 
-pub fn printPercent(writer: anytype, width: usize, value: f32, max: f32) !void {
+pub fn printProgressBar(writer: anytype, column_count: usize, value: f32, max: f32) !void {
     const colors: [8][]const u8 = .{
         "\x1b[31m", // Red
         "\x1b[91m", // Bright Red
@@ -76,23 +80,13 @@ pub fn printPercent(writer: anytype, width: usize, value: f32, max: f32) !void {
         "\x1b[94m", // Bright Blue
     };
     const percent = value / max;
-    // std.debug.print("here {d:.2} / {d:.2} = {d:.2}\n", .{value, max, percent});
     const index = @min(7, floatToInt(usize, percent * 8));
+    const progress: usize = floatToInt(usize, intToFloat(f32, column_count - 2) * percent);
 
-    var bar: usize = (width - 2);
-    bar = floatToInt(usize, intToFloat(f32, bar) * percent);
-
-    try writer.print("{s}[", .{colors[index]});
-
-    for (0..bar) |_| {
-        try writer.print("=", .{});
-    }
-
-    for (0..(width - bar - 2)) |_| {
-        try writer.print(" ", .{});
-    }
-
-    try writer.print("]\x1b[0m", .{});
+    try writer.print("{s}[", .{colors[index]}); // Set color
+    for (0..progress) |_| try writer.print("=", .{});
+    for (0..(column_count - (progress + 2))) |_| try writer.print(" ", .{});
+    try writer.print("]\x1b[0m", .{}); // Clear color
 }
 
 pub fn main() !void {
@@ -100,136 +94,135 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    const data_home_app_path = try BaseDirectory.getDataHomeApp(allocator, "immersion-rpg");
-    defer allocator.free(data_home_app_path);
+    const file = blk: {
+        const app_data_dir = try BaseDirectory.getDataHomeApp(allocator, "immersion-rpg");
+        defer allocator.free(app_data_dir);
 
-    const data_path = try std.fs.path.join(allocator, &.{ data_home_app_path, "data.csv" });
-    defer allocator.free(data_path);
+        const app_data_file = try std.fs.path.join(allocator, &.{ app_data_dir, "data.csv" });
+        defer allocator.free(app_data_file);
 
-    const file: std.fs.File = std.fs.openFileAbsolute(data_path, .{}) catch |open_error| switch (open_error) {
-        error.FileNotFound => blk: {
-            std.fs.makeDirAbsolute(data_home_app_path) catch |err| if (err != error.PathAlreadyExists) return err;
-            const new_file = try std.fs.createFileAbsolute(data_path, .{ .read = true });
-            try new_file.writeAll("type,amount");
-            try new_file.seekTo(0);
-            break :blk new_file;
-        },
-        else => return open_error,
+        break :blk std.fs.openFileAbsolute(app_data_file, .{}) catch |open_error|
+            switch (open_error) {
+                error.FileNotFound => {
+                    std.fs.makeDirAbsolute(app_data_dir) catch |err|
+                        if (err != error.PathAlreadyExists) return err;
+                    const new_file = try std.fs.createFileAbsolute(app_data_file, .{ .read = true });
+                    try new_file.writeAll("type,amount");
+                    try new_file.seekTo(0);
+                    break :blk new_file;
+                },
+                else => return open_error,
+            };
     };
     defer file.close();
 
-    const reader = file.reader();
-
-    const Line = struct {
+    const Skill = struct {
+        name: []const u8,
         type: Type,
         amount: f32,
     };
-    var lines = std.ArrayList(Line).init(allocator);
-    defer lines.deinit();
+    var skills = [_]Skill{
+        .{ .name = "Anki", .type = Type.anki, .amount = 0 },
+        .{ .name = "Visual Novel", .type = Type.visual_novel, .amount = 0 },
+        .{ .name = "Reading", .type = Type.reading, .amount = 0 },
+        .{ .name = "Manga", .type = Type.manga, .amount = 0 },
+        .{ .name = "Listening", .type = Type.listening, .amount = 0 },
+        .{ .name = "Anime", .type = Type.anime, .amount = 0 },
+        .{ .name = "Total", .type = Type.total, .amount = 0 },
+    };
 
-    var raw_line = std.ArrayList(u8).init(allocator);
-    defer raw_line.deinit();
+    var line = std.ArrayList(u8).init(allocator);
+    defer line.deinit();
+
+    const reader = file.reader();
 
     var index: usize = 0;
-    while (reader.readUntilDelimiterArrayList(&raw_line, '\n', std.math.maxInt(usize))) : (index += 1) {
+    while (reader.readUntilDelimiterArrayList(&line, '\n', std.math.maxInt(usize))) : (index += 1) {
         if (index == 0) continue;
-        var it = std.mem.splitAny(u8, raw_line.items, ",");
+        var it = std.mem.splitAny(u8, line.items, ",");
         var j: usize = 0;
-        var line: Line = undefined;
+        var row_type: Type = undefined;
+        var row_amount: f32 = undefined;
         while (it.next()) |cell| : (j += 1) {
             switch (j) {
                 0 => {
                     if (std.mem.eql(u8, "anki", cell)) {
-                        line.type = .anki;
+                        row_type = .anki;
                     } else if (std.mem.eql(u8, "vn", cell)) {
-                        line.type = .visual_novel;
+                        row_type = .visual_novel;
                     } else if (std.mem.eql(u8, "reading", cell)) {
-                        line.type = .reading;
+                        row_type = .reading;
                     } else if (std.mem.eql(u8, "manga", cell)) {
-                        line.type = .manga;
+                        row_type = .manga;
                     } else if (std.mem.eql(u8, "listening", cell)) {
-                        line.type = .listening;
+                        row_type = .listening;
                     } else if (std.mem.eql(u8, "anime", cell)) {
-                        line.type = .anime;
+                        row_type = .anime;
                     } else unreachable;
                 },
-                1 => line.amount = try std.fmt.parseFloat(f32, cell),
+                1 => row_amount = try std.fmt.parseFloat(f32, cell),
                 else => unreachable,
             }
         }
-        try lines.append(line);
+        skills[row_type.toUsize()].amount = if (row_type == .anki)
+            @max(skills[row_type.toUsize()].amount, row_amount)
+        else
+            skills[row_type.toUsize()].amount + row_amount;
     } else |err| if (err != error.EndOfStream) return err;
 
-    var total: [Type.len()]f32 = std.mem.zeroes([Type.len()]f32);
-
-    for (lines.items) |line| {
-        total[@intFromEnum(line.type)] = if (line.type == .anki)
-            @max(total[@intFromEnum(line.type)], line.amount)
-        else
-            total[@intFromEnum(line.type)] + line.amount;
+    for (0..skills.len - 1) |i| {
+        skills[skills.len - 1].amount += skills[i].amount / Type.fromInt(i).getGoal() * 100;
     }
+    skills[skills.len - 1].amount /= 6;
 
-    for (0..total.len - 1) |i| {
-        total[total.len - 1] += total[i] / Type.fromInt(i).getGoal() * 100;
-    }
-    total[total.len - 1] /= 6;
-
-    var buf: std.posix.winsize = undefined;
-    if (std.posix.errno(std.posix.system.ioctl(
-        std.io.getStdOut().handle,
-        std.posix.T.IOCGWINSZ,
-        @intFromPtr(&buf),
-    )) != .SUCCESS) return error.IoctlError;
-
-    const skills = &.{
-        .{ "Anki", Type.anki },
-        .{ "Visual Novel", Type.visual_novel },
-        .{ "Reading", Type.reading },
-        .{ "Manga", Type.manga },
-        .{ "Listening", Type.listening },
-        .{ "Anime", Type.anime },
-        .{ "Total", Type.total },
+    const column_count = blk: {
+        var window_size: std.posix.winsize = undefined;
+        if (std.posix.errno(std.posix.system.ioctl(
+            std.io.getStdOut().handle,
+            std.posix.T.IOCGWINSZ,
+            @intFromPtr(&window_size),
+        )) != .SUCCESS) return error.IoctlError;
+        break :blk window_size.col;
     };
 
-    const max_string: usize = comptime blk: {
+    const max_string_len: usize = blk: {
         var max: usize = 0;
         for (skills) |skill| {
-            max = @max(skill[0].len, max);
+            max = @max(skill.name.len, max);
         }
         break :blk max;
     };
 
     const stdout = std.io.getStdOut().writer();
-    const fmt = std.fmt.comptimePrint("{{s: <{}}} ({{:2}}/99)", .{max_string});
 
-    inline for (skills) |skill| {
-        const name, const skill_type = skill;
-        const goal = skill_type.getGoal();
-        const value = total[@intFromEnum(skill_type)];
-        const level, const need = calcLevel(value, goal);
-        std.debug.print(fmt, .{ name, level });
-        if (level != 99) {
-            const string = try std.fmt.allocPrint(allocator, "{}/{d:.2} ({d:.2}%)\n", .{
-                skn.fmt.Float{ .value = value },
-                skn.fmt.Float{ .value = need },
-                value / need * 100,
+    for (skills) |skill| {
+        const goal = skill.type.getGoal();
+        const level, const need_xp = calcLevel(skill.amount, goal);
+
+        try stdout.print("{s} ", .{skill.name});
+        for (0..(max_string_len - skill.name.len)) |_| try stdout.writeAll(" ");
+        try stdout.print("({:2})/99", .{level});
+        const current_level_string_len= 7;
+
+        const string = blk: {
+            if (level != 99) {
+                break :blk try std.fmt.allocPrint(allocator, "{}/{d:.2} ({d:.2}%)\n", .{
+                    skn.fmt.Float{ .value = skill.amount },
+                    skn.fmt.Float{ .value = need_xp },
+                    skill.amount / need_xp * 100,
+                });
+            } else break :blk try std.fmt.allocPrint(allocator, "{}\n", .{
+                skn.fmt.Float{ .value = skill.amount },
             });
-            defer allocator.free(string);
-            for (0..buf.col - max_string - 7 - string.len) |_| {
-                std.debug.print(" ", .{});
-            }
-            std.debug.print("{s}", .{string});
-        } else {
-            const string = try std.fmt.allocPrint(allocator, "{}\n", .{
-                skn.fmt.Float{ .value = -value },
-            });
-            defer allocator.free(string);
-            for (0..buf.col - max_string - 7 - string.len) |_| {
-                std.debug.print(" ", .{});
-            }
-            std.debug.print("{s}", .{string});
+        };
+        defer allocator.free(string);
+
+        for (0..column_count - (max_string_len + current_level_string_len + string.len)) |_| {
+            try stdout.print(" ", .{});
         }
-        try printPercent(stdout, buf.col, value, need);
-        std.debug.print("\n", .{});
+        try stdout.print("{s}", .{string});
+
+        try printProgressBar(stdout, column_count, skill.amount, need_xp);
+        try stdout.print("\n", .{});
     }
 }
